@@ -76,6 +76,17 @@ module.exports = async (req, res) => {
     return res.status(502).json({ ok: false, error: "Could not save your RSVP. Please try again." });
   }
 
+  // Make sure the contact is in the RSVP segment (segment_ids on create/update
+  // is not applied by Resend). Best effort — the RSVP is already saved.
+  try {
+    const sr = await fetch(`https://api.resend.com/contacts/${encodeURIComponent(email)}/segments/${encodeURIComponent(SEGMENT_ID)}`, {
+      method: "POST", headers: authHeaders,
+    });
+    if (!sr.ok) console.error("Resend add to segment failed", sr.status, await sr.text().catch(()=>''));
+  } catch (e) {
+    console.error("Resend add to segment error", e);
+  }
+
   // Confirmation email (best effort — never blocks the RSVP)
   try {
     const MAIL_FROM = process.env.MAIL_FROM || "Reno & Jonel <babyshower@apexacquisition.co.za>";

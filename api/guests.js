@@ -1,6 +1,6 @@
 // GET /api/guests — admin-only RSVP list from Resend. Gated by ADMIN_TOKEN.
 // Header: x-admin-token: <token>   (or ?token=<token>)
-// Env: RESEND_API_KEY, RSVP_SEGMENT_ID, ADMIN_TOKEN
+// Env: RESEND_API_KEY, ADMIN_TOKEN
 module.exports = async (req, res) => {
   if (req.method !== "GET") {
     res.setHeader("Allow", "GET");
@@ -14,8 +14,7 @@ module.exports = async (req, res) => {
   }
 
   const RESEND_API_KEY = process.env.RESEND_API_KEY;
-  const SEGMENT_ID = process.env.RSVP_SEGMENT_ID;
-  if (!RESEND_API_KEY || !SEGMENT_ID) {
+  if (!RESEND_API_KEY) {
     return res.status(500).json({ ok: false, error: "Server not configured." });
   }
   const authHeaders = { Authorization: `Bearer ${RESEND_API_KEY}` };
@@ -27,13 +26,24 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const lr = await fetch(`https://api.resend.com/contacts?segment_id=${encodeURIComponent(SEGMENT_ID)}`, { headers: authHeaders });
-    if (!lr.ok) {
-      console.error("Resend list failed", lr.status, await lr.text().catch(()=>''));
-      return res.status(502).json({ ok: false, error: "Could not load guests." });
+    // List every contact (paged). RSVPs are identified by their rsvp_status
+    // property below, not by segment membership: contacts created via the
+    // API were not being added to the RSVP segment.
+    const rows = [];
+    let after = null;
+    for (let page = 0; page < 20; page++) {
+      const qs = `limit=100${after ? `&after=${encodeURIComponent(after)}` : ""}`;
+      const lr = await fetch(`https://api.resend.com/contacts?${qs}`, { headers: authHeaders });
+      if (!lr.ok) {
+        console.error("Resend list failed", lr.status, await lr.text().catch(()=>''));
+        return res.status(502).json({ ok: false, error: "Could not load guests." });
+      }
+      const listJson = await lr.json();
+      const batch = Array.isArray(listJson.data) ? listJson.data : (Array.isArray(listJson) ? listJson : []);
+      rows.push(...batch);
+      if (!listJson.has_more || !batch.length) break;
+      after = batch[batch.length - 1].id;
     }
-    const listJson = await lr.json();
-    const rows = Array.isArray(listJson.data) ? listJson.data : (Array.isArray(listJson) ? listJson : []);
 
     // Fetch each contact's full detail (properties aren't in the list payload).
     const guests = await Promise.all(rows.map(async (c) => {
@@ -51,6 +61,7 @@ module.exports = async (req, res) => {
         last: c.last_name || "",
         email: c.email || "",
         phone: propVal(props, "phone") || "",
+        isRsvp: !!propVal(props, "rsvp_status"),
         status: propVal(props, "rsvp_status") || "pending",
         adults: propVal(props, "adults"),
         children: propVal(props, "children"),
@@ -61,7 +72,9 @@ module.exports = async (req, res) => {
     }));
 
     // Exclude the internal test record if present.
-    const clean = guests.filter(g => g.email !== "test-rsvp@apexacquisition.co.za");
+    const clean = guests
+      .filter(g => g.isRsvp && g.email !== "test-rsvp@apexacquisition.co.za")
+      .map(({ isRsvp, ...g }) => g);
     clean.sort((a, b) => (b.created || "").localeCompare(a.created || ""));
     return res.status(200).json({ ok: true, guests: clean });
   } catch (e) {
