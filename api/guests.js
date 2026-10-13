@@ -1,6 +1,9 @@
 // GET /api/guests — admin-only RSVP list from Resend. Gated by ADMIN_TOKEN.
 // Header: x-admin-token: <token>   (or ?token=<token>)
 // Env: RESEND_API_KEY, ADMIN_TOKEN
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const RETRY_BASE_MS = Number(process.env.RESEND_RETRY_BASE_MS) || 300;
+
 module.exports = async (req, res) => {
   if (req.method !== "GET") {
     res.setHeader("Allow", "GET");
@@ -46,37 +49,56 @@ module.exports = async (req, res) => {
     }
 
     // Fetch each contact's full detail (properties aren't in the list payload).
-    const guests = await Promise.all(rows.map(async (c) => {
-      const id = c.id;
-      let props = c.properties || null;
-      if (!props && id) {
+    // Two at a time with retries so Resend's rate limit can't drop anyone, and a
+    // contact whose detail still fails is shown as "unknown" rather than hidden.
+    async function getProps(c) {
+      if (c.properties) return c.properties;
+      for (let attempt = 0; attempt < 4; attempt++) {
         try {
-          const gr = await fetch(`https://api.resend.com/contacts/${encodeURIComponent(id)}`, { headers: authHeaders });
-          if (gr.ok) { const gj = await gr.json(); props = gj.properties || (gj.data && gj.data.properties) || null; }
-        } catch (_) {}
+          const gr = await fetch(`https://api.resend.com/contacts/${encodeURIComponent(c.id)}`, { headers: authHeaders });
+          if (gr.ok) { const gj = await gr.json(); return gj.properties || (gj.data && gj.data.properties) || {}; }
+          if (gr.status !== 429 && gr.status < 500) { console.error("Resend contact failed", c.id, gr.status); return null; }
+          const wait = Number(gr.headers && gr.headers.get && gr.headers.get("retry-after"));
+          await sleep(wait > 0 ? Math.min(wait, 5) * 1000 : RETRY_BASE_MS * 2 ** attempt);
+        } catch (e) {
+          await sleep(RETRY_BASE_MS * 2 ** attempt);
+        }
       }
-      return {
-        id,
-        first: c.first_name || "",
-        last: c.last_name || "",
-        email: c.email || "",
-        phone: propVal(props, "phone") || "",
-        isRsvp: !!propVal(props, "rsvp_status"),
-        status: propVal(props, "rsvp_status") || "pending",
-        adults: propVal(props, "adults"),
-        children: propVal(props, "children"),
-        dietary: propVal(props, "dietary") || "",
-        message: propVal(props, "guest_message") || "",
-        created: c.created_at || null,
-      };
-    }));
+      console.error("Resend contact gave up", c.id);
+      return null;
+    }
+
+    const guests = [];
+    let incomplete = 0;
+    for (let i = 0; i < rows.length; i += 2) {
+      const pair = rows.slice(i, i + 2);
+      const propsList = await Promise.all(pair.map(getProps));
+      pair.forEach((c, j) => {
+        const props = propsList[j];
+        if (!props) incomplete++;
+        guests.push({
+          id: c.id,
+          first: c.first_name || "",
+          last: c.last_name || "",
+          email: c.email || "",
+          phone: propVal(props, "phone") || "",
+          isRsvp: !props || !!propVal(props, "rsvp_status"),
+          status: props ? (propVal(props, "rsvp_status") || "pending") : "unknown",
+          adults: propVal(props, "adults"),
+          children: propVal(props, "children"),
+          dietary: propVal(props, "dietary") || "",
+          message: propVal(props, "guest_message") || "",
+          created: c.created_at || null,
+        });
+      });
+    }
 
     // Exclude the internal test record if present.
     const clean = guests
       .filter(g => g.isRsvp && g.email !== "test-rsvp@apexacquisition.co.za")
       .map(({ isRsvp, ...g }) => g);
     clean.sort((a, b) => (b.created || "").localeCompare(a.created || ""));
-    return res.status(200).json({ ok: true, guests: clean });
+    return res.status(200).json({ ok: true, guests: clean, incomplete });
   } catch (e) {
     console.error("Resend read error", e);
     return res.status(502).json({ ok: false, error: "Could not load guests." });

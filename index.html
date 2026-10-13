@@ -170,6 +170,7 @@
   .badge.attending { background:#E4EBD4; color:var(--leaf-dark); }
   .badge.not_attending { background:#EDEAE0; color:#746F5C; }
   .badge.pending { background:#FBEFC7; color:#9A7413; }
+  .badge.unknown { background:#F6DCD5; color:#9A3B22; }
   .row-actions button { border:none; background:none; font-size:11.5px; color:var(--ink-soft); text-decoration:underline; cursor:pointer; margin-right:8px; padding: 0;}
   .row-actions button.danger { color:#B4443A; }
 
@@ -652,7 +653,7 @@
       if(!resp.ok){ toast('Could not load — try again'); return; }
       const data = await resp.json();
       adminToken = val; guests = (data.guests || []).map(mapRow);
-      showView('admin'); renderGuests();
+      showView('admin'); renderGuests(); warnIncomplete(data);
     } catch(e){ toast('Network error — try again'); }
   }
 
@@ -667,8 +668,14 @@
       const resp = await fetch('/api/guests', { headers: { 'x-admin-token': adminToken } });
       if(!resp.ok){ toast('Refresh failed'); return; }
       const data = await resp.json();
-      guests = (data.guests || []).map(mapRow); renderGuests(); toast('Updated');
+      guests = (data.guests || []).map(mapRow); renderGuests(); if(!warnIncomplete(data)) toast('Updated');
     } catch(e){ toast('Refresh failed'); }
+  }
+
+  function warnIncomplete(data){
+    if(!data.incomplete) return false;
+    toast(data.incomplete + ' guest(s) could not fully load — tap Refresh');
+    return true;
   }
 
   function computeStats(){
