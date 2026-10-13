@@ -343,7 +343,7 @@
 
       <div class="admin-toolbar">
         <button class="primary" onclick="refreshGuests()">Refresh</button>
-        <button onclick="exportCsv()">Export CSV</button>
+        <button onclick="downloadGuestList()">Download guest list</button>
         <button onclick="copyText(location.origin + location.pathname, 'RSVP link')">Copy RSVP link</button>
       </div>
 
@@ -716,22 +716,127 @@
     });
     document.getElementById('guest-tbody').innerHTML = rows.map(g=>`
       <tr>
-        <td>${g.first||''} ${g.last||''}<br><span style="color:var(--ink-soft);font-size:11px;">${g.email||''}${g.phone ? ' · '+g.phone : ''}</span></td>
-        <td><span class="badge ${g.status}">${(g.status||'').replace('_',' ')}</span></td>
+        <td>${esc(g.first)} ${esc(g.last)}<br><span style="color:var(--ink-soft);font-size:11px;">${esc(g.email)}${g.phone ? ' · '+esc(g.phone) : ''}</span></td>
+        <td><span class="badge ${esc(g.status)}">${esc((g.status||'').replace('_',' '))}</span></td>
         <td>${g.status==='attending' ? ((g.adults||0)+'A / '+(g.children||0)+'C') : '—'}</td>
       </tr>
     `).join('') || '<tr><td colspan="3" style="text-align:center;color:var(--ink-soft);padding:20px;">No RSVPs yet.</td></tr>';
   }
 
-  function exportCsv(){
-    const headers = ['first','last','email','phone','status','adults','children'];
-    const rows = guests.map(g=>headers.map(h=>g[h] ?? '').join(','));
-    const csv = [headers.join(','), ...rows].join('\n');
-    const blob = new Blob([csv], {type:'text/csv'});
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'guest-list.csv';
-    a.click();
+  function esc(v){
+    return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // Branded "Attending" guest list, saved as a PDF.
+  const HTML2PDF_SRC = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js';
+  const HTML2PDF_SRI = 'sha384-Yv5O+t3uE3hunW8uyrbpPW3iw6/5/Y7HitWJBLgqfMoA36NogMmy+8wWZMpn3HWc';
+  let html2pdfLoading = null;
+  function loadHtml2pdf(){
+    if(window.html2pdf) return Promise.resolve(window.html2pdf);
+    if(!html2pdfLoading){
+      html2pdfLoading = new Promise((resolve, reject) => {
+        const sc = document.createElement('script');
+        sc.src = HTML2PDF_SRC; sc.integrity = HTML2PDF_SRI; sc.crossOrigin = 'anonymous';
+        sc.onload = () => window.html2pdf ? resolve(window.html2pdf) : reject(new Error('html2pdf missing'));
+        sc.onerror = () => { html2pdfLoading = null; reject(new Error('html2pdf failed to load')); };
+        document.head.appendChild(sc);
+      });
+    }
+    return html2pdfLoading;
+  }
+
+  function guestListHtml(){
+    const list = guests.filter(g=>g.status==='attending')
+      .sort((a,b)=>(a.first+' '+a.last).localeCompare(b.first+' '+b.last));
+    const adults = list.reduce((s,g)=>s+(g.adults||1),0);
+    const kids = list.reduce((s,g)=>s+(g.children||0),0);
+    const lemons = document.querySelector('.arch-branch')?.src || '';
+    const today = new Date().toLocaleDateString('en-ZA', { day:'numeric', month:'long', year:'numeric' });
+    const rows = list.map((g,i)=>`
+      <tr>
+        <td class="n">${i+1}</td>
+        <td><strong>${esc(g.first)} ${esc(g.last)}</strong>${g.message ? `<div class="msg">“${esc(g.message)}”</div>` : ''}</td>
+        <td class="c">${g.adults||1}</td>
+        <td class="c">${g.children||0}</td>
+        <td>${esc(g.dietary && g.dietary!=='None' ? g.dietary : '—')}</td>
+        <td class="ph">${esc(g.phone||'—')}</td>
+      </tr>`).join('');
+    return { count: list.length, html: `
+      <style>
+        .gl { box-sizing:border-box; width:794px; padding:0 40px 24px; background:#fff; color:#3A3A2E; font-family:'Poppins',sans-serif; }
+        .gl .branch { display:block; width:calc(100% + 80px); margin:0 -40px; height:150px; object-fit:cover; object-position:center 30%; }
+        .gl h1 { font-family:'Dancing Script',cursive; font-weight:700; font-size:44px; color:#55672E; text-align:center; margin:14px 0 2px; }
+        .gl .sub { text-align:center; font-size:12px; color:#746F5C; margin:0; letter-spacing:.3px; }
+        .gl h2 { font-family:'Dancing Script',cursive; font-size:28px; color:#C9971C; text-align:center; margin:20px 0 4px; }
+        .gl .date { text-align:center; font-size:10.5px; color:#9A9478; margin:0 0 16px; }
+        .gl .stats { display:flex; gap:10px; margin-bottom:18px; }
+        .gl .stat { flex:1; background:#FBF6E4; border:1px solid #EFE8D4; border-radius:10px; padding:10px 6px; text-align:center; }
+        .gl .stat b { display:block; font-size:22px; color:#55672E; font-weight:600; }
+        .gl .stat span { font-size:9.5px; text-transform:uppercase; letter-spacing:1px; color:#746F5C; }
+        .gl table { width:100%; border-collapse:collapse; font-size:11.5px; }
+        .gl th { background:#7C8F4A; color:#fff; font-weight:500; text-align:left; padding:8px; font-size:10.5px; letter-spacing:.5px; text-transform:uppercase; }
+        .gl td { padding:8px; border-bottom:1px solid #EFE8D4; vertical-align:top; }
+        .gl tr:nth-child(even) td { background:#FFFDF7; }
+        .gl tr { page-break-inside:avoid; }
+        .gl .n { color:#9A9478; width:22px; }
+        .gl .c { text-align:center; width:48px; }
+        .gl .ph { white-space:nowrap; }
+        .gl .msg { color:#746F5C; font-style:italic; font-size:10.5px; margin-top:2px; }
+        .gl .empty { text-align:center; color:#746F5C; padding:24px; }
+        .gl .foot { text-align:center; font-size:10px; color:#9A9478; margin-top:18px; }
+      </style>
+      <div class="gl">
+        ${lemons ? `<img class="branch" src="${lemons}" alt="">` : ''}
+        <h1>Reno &amp; Jonel's Baby Shower</h1>
+        <p class="sub">Sunday, 6 December 2026 · 09:00 · The Millhouse Kitchen (Front Deck), Lourensford, Somerset West</p>
+        <h2>Attending Guests</h2>
+        <p class="date">Updated ${esc(today)}</p>
+        <div class="stats">
+          <div class="stat"><b>${list.length}</b><span>RSVPs</span></div>
+          <div class="stat"><b>${adults}</b><span>Adults</span></div>
+          <div class="stat"><b>${kids}</b><span>Children</span></div>
+          <div class="stat"><b>${adults+kids}</b><span>Total guests</span></div>
+        </div>
+        <table>
+          <thead><tr><th>#</th><th>Guest</th><th class="c">Adults</th><th class="c">Kids</th><th>Dietary</th><th>Phone</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="6" class="empty">No one has RSVP’d as attending yet.</td></tr>'}</tbody>
+        </table>
+        <p class="foot">🍋 We can't wait to squeeze you! 🍋</p>
+      </div>` };
+  }
+
+  async function downloadGuestList(){
+    const { count, html } = guestListHtml();
+    if(!count){ toast('No attending guests yet'); return; }
+    const filename = 'Reno-Jonel-Baby-Shower-Guest-List.pdf';
+    toast('Preparing your guest list…');
+    try {
+      const html2pdf = await loadHtml2pdf();
+      if(document.fonts && document.fonts.ready) await document.fonts.ready;
+      const holder = document.createElement('div');
+      holder.style.cssText = 'position:fixed;left:-10000px;top:0;';
+      holder.innerHTML = html;
+      document.body.appendChild(holder);
+      try {
+        await html2pdf().set({
+          margin: [10, 0, 10, 0], filename,
+          image: { type:'jpeg', quality:0.95 },
+          html2canvas: { scale:2, useCORS:true, backgroundColor:'#ffffff' },
+          jsPDF: { unit:'mm', format:'a4', orientation:'portrait' },
+          pagebreak: { mode:['css','legacy'], avoid:'tr' },
+        }).from(holder.querySelector('.gl')).save();
+      } finally { holder.remove(); }
+      toast('Guest list downloaded');
+    } catch(e){
+      // Fallback: open the same page for the browser's Print → Save as PDF.
+      const w = window.open('', '_blank');
+      if(!w){ toast('Could not create the PDF — allow pop-ups and try again'); return; }
+      w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${filename.replace('.pdf','')}</title>
+        <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@500;700&family=Poppins:wght@300;400;500;600&display=swap" rel="stylesheet">
+        <style>body{margin:0;background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact}.gl{margin:0 auto}</style>
+        </head><body>${html}<script>window.onload=()=>setTimeout(()=>print(),400)<\/script></body></html>`);
+      w.document.close();
+    }
   }
 
   function copyText(text, label){
